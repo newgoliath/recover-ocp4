@@ -1,0 +1,35 @@
+---
+# tasks file for recover-ocp4
+
+
+- name: Heal A cluster
+  hosts: localhost
+
+  tasks:
+
+    - name: get facts of instances with no public DNS
+      ec2_instance_facts:
+        filters:
+          dns-name: ""
+      register: ec2
+    - debug: var=ec2
+
+    - name: set state of the dns-name "" instances
+      ec2:
+        instance_ids: "{{ item.instance_id }}"
+        state: "{{ state }}"
+        #region: "us-east-2"
+      loop: "{{ ec2.instances }} "
+
+    - name: deploy a jump instance
+      # must use a well known key
+
+    - name: scp cluster key to the jump instance
+      loop:
+        - $HOME/.ssh/cluster-NNNN
+
+    - name: setup ssh config
+       
+    - name: set in ansible as jump instance
+
+
