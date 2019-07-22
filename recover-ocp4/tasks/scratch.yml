@@ -1,0 +1,21 @@
+---
+
+- name: Testme
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+  - name: is there a jumpbox
+    ec2_instance_facts:
+      filters:
+        "tag:Name": "*master*" 
+    register: jumpbox_exists
+
+
+  - name: medebug
+    debug:
+      msg: "{{ jumpbox_exists }}"
+    when: jumpbox_exists["instances"]|length==1
+
+

@@ -1,0 +1,333 @@
+---
+
+- name: Create Jumpbox 
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ lookup('env', 'GUID') }}-key.pub"
+    cluster_region: "us-east-2"
+    cluster_vpc: "vpc-04ed4285a2858ac00"
+    GUID: "{{ lookup('env', 'GUID') }}"
+    HOME: "{{ lookup('env', 'HOME') }}"
+    ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
+
+  tasks:
+
+    - name: get control plane
+      ec2_instance_facts:
+        filters:
+          "tag:Name": "*master*"
+      register: control_plane
+
+    - name: add control_planes to inventory
+      add_host: 
+        name: "{{ item.private_dns_name }}"
+        groups: control_plane
+      loop: "{{ control_plane.instances }}"
+      when: control_plane.instances[0] is defined
+
+    - name: is there a jumpbox?
+      ec2_instance_facts:
+        filters:
+          "tag:type": "jumpbox"
+      register: jumpboxes
+
+    - name: add existing jumpbox to inventory
+      add_host:
+        name: "{{ jumpboxes.instances[0].public_ip_address }}"
+        groups: jumpbox
+      when: jumpboxes.instances[0] is defined
+
+    - name: setup jumpbox
+      block:
+
+      - name: Put the cluster keypair in AWS for jumphost
+        ec2_key:
+          name: cluster_keypair
+          key_material: "{{ lookup('file', cluster_key_filename) }}"
+
+      - name: Create SSH security group
+        ec2_group:
+          name: jumpbox
+          description: jumpbox description
+          region: "{{ cluster_region }}"
+          vpc_id: "{{ cluster_vpc }}"
+          rules:
+            - proto: tcp
+              ports: 22
+              cidr_ip: 0.0.0.0/0
+        register: sg_jumpbox
+
+      - name: get vpc_subnet_id
+        ec2_vpc_subnet_facts:
+          filters:
+            vpc-id: "{{ sg_jumpbox.vpc_id }}"
+            cidr-block: "10.0.0.0/20"
+        register: ec2_vpc_subnet_ids
+
+      - name: debug me
+        debug:
+          var: ec2_vpc_subnet_ids
+          verbosity: 4
+
+      - name: launch ec2 instance
+        ec2:
+          key_name: "cluster_keypair"
+          instance_type: t2.micro
+          group_id: "{{ sg_jumpbox.group_id }}"
+          image: ami-0520e698dd500b1d1
+          wait: true
+          region: "{{ cluster_region }}"
+          vpc_subnet_id: "{{ ec2_vpc_subnet_ids.subnets[0].subnet_id }}"
+          assign_public_ip: yes
+          instance_tags:
+            type: jumpbox
+        register: ec2
+
+      - name: Add jumpbox instance public IP to host group
+        add_host:
+          name: "{{ ec2.instances[0].public_ip }}"
+          groups: jumpbox
+
+      - name: Wait for SSH to come up
+        delegate_to: "{{ ec2.instances[0].public_ip }}"
+        wait_for_connection:
+          delay: 10
+          timeout: 180
+
+      when: jumpboxes["instances"][0] is not defined
+
+    - name: delete clientvm ssh config
+      file:
+        dest: "{{ ssh_config }}"
+        state: absent
+
+    - name: create empty ssh config
+      file:
+        dest: "{{ ssh_config }}"
+        state: touch
+
+    - name: setup clientvm ssh config
+      blockinfile:
+        dest: "{{ ssh_config }}"
+        marker: "##### {mark} Adding masters with ProxyJump"
+        content: |
+          Host {{ jumpboxes.instances[0].public_ip_address }}
+            User ec2-user
+
+          Host *.internal
+            User core
+            ProxyJump {{ jumpboxes.instances[0].public_ip_address }}
+
+          Match User ec2-user
+            IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+
+          Match User core
+            IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+
+          Host *
+            ControlMaster auto
+            ControlPath /tmp/%h-%r
+            ControlPersist 5m
+            StrictHostKeyChecking no
+
+- name: prep jumpbox
+  hosts: jumpbox
+  vars:
+    GUID: "{{ lookup('env', 'GUID') }}"
+    HOME: "{{ lookup('env', 'HOME') }}"
+    ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
+  tasks:
+
+  - name: put kubeconfig on jumpbox
+    copy:
+      src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
+      dest: "{{ ansible_env.HOME }}/kubeconfig"
+
+  - name: copy cluster ssh key to jumpbox
+    copy:
+      src: "{{ HOME }}/.ssh/cluster-{{ GUID }}-key"
+      dest: "{{ ansible_env.HOME }}/.ssh/"
+      mode: 0600
+
+  - name: delete jumpbox ssh config
+    file:
+      dest: "{{ ssh_config }}"
+      state: absent
+
+  - name: create empty ssh config
+    file:
+      dest: "{{ ssh_config }}"
+      state: touch
+      mode: 0600
+
+  - name: setup ssh config on jumpbox
+    blockinfile:
+      dest: "{{ ssh_config }}"
+      marker: "##### {mark} ADD default key and user"
+      content: |
+        Host *
+          IdentityFile {{ ansible_env.HOME }}/.ssh/cluster-{{ GUID }}-key
+          User core
+          StrictHostKeyChecking no
+          ControlPath /tmp/{{ GUID }}-%r-%h-%p
+          ControlPersist 5m
+
+  - name: add default key to ssh config
+    debug:
+      msg: "hi!"
+
+  - name: list all nodes
+    debug:
+      msg: "list all nodes"
+
+- name: Obtain the cluster-kube-apiserver-operator image reference for a release
+  hosts: control_plane[0]
+  gather_facts: false
+  become: yes
+  vars:
+    KAO_IMAGE: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:608d15862ef994bded9e3c0d6ab3c6bb9a6e583ec6a40bd83a847f19c9a927ac
+    RECOVERY_KUBEAPI: /etc/kubernetes/static-pod-resources/recovery-kube-apiserver-pod/admin.kubeconfig
+
+  tasks:
+    - name: hostname
+      command: hostname
+
+    - name: put kubeconfig on remote host
+      copy:
+        src: "{{ lookup('env', 'HOME') }}/cluster-{{ lookup('env', 'GUID') }}/auth/kubeconfig"
+        dest: "/home/core/kubeconfig"
+
+    - name: Pull the cluster-kube-apiserver-operator image.
+      command: podman pull --authfile=/var/lib/kubelet/config.json {{ KAO_IMAGE }}
+
+    - name: create a recovery API server
+      command: podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator "{{ KAO_IMAGE }}" recovery-apiserver create
+      register: recovery_kubeconfig
+
+    - name: wait for recovery API
+      command: oc get namespace kube-system --config {{ RECOVERY_KUBEAPI }}  2>dev/null
+      register: result
+      until: result.stdout.find("Active") != -1
+      retries: 100
+      delay: 10
+
+    - name: Run the regenerate-certificates command. It fixes the certificates in the API, overwrites the old certificates on the local drive, and restarts static Pods to pick them up.
+      command: "podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator {{ KAO_IMAGE }} regenerate-certificates"
+
+    - name: After the certificates are fixed in the API, use the following commands to force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer. 1/3
+      shell: oc patch kubeapiserver cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"} }' --type=merge --config {{ RECOVERY_KUBEAPI }} 
+
+    - name: 2/3
+      shell: oc patch kubecontrollermanager cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge --config {{ RECOVERY_KUBEAPI }}  
+
+    - name: 3/3
+      shell: oc patch kubescheduler cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge --config {{ RECOVERY_KUBEAPI }} 
+
+    - name: create empty script
+      file:
+        dest: "/root/restore_kubeconfig.sh"
+        state: touch
+        mode: 755
+
+    - name: create script
+      file:
+        dest: "/root/restore_kubeconfig.sh"
+        marker: "#### {mark}"
+        content: |
+          #!/bin/bash
+          
+          set -eou pipefail
+          
+          # context
+          intapi=$(oc get infrastructures.config.openshift.io cluster -o "jsonpath={.status.apiServerURL}")
+          context="$(oc config current-context)"
+          # cluster
+          cluster="$(oc config view -o "jsonpath={.contexts[?(@.name==\"$context\")].context.cluster}")"
+          server="$(oc config view -o "jsonpath={.clusters[?(@.name==\"$cluster\")].cluster.server}")"
+          # token
+          ca_crt_data="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token -o "jsonpath={.data.ca\.crt}" | base64 --decode)"
+          namespace="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token  -o "jsonpath={.data.namespace}" | base64 --decode)"
+          token="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token -o "jsonpath={.data.token}" | base64 --decode)"
+          
+          export KUBECONFIG="$(mktemp)"
+          kubectl config set-credentials "kubelet" --token="$token" >/dev/null
+          ca_crt="$(mktemp)"; echo "$ca_crt_data" > $ca_crt
+          kubectl config set-cluster $cluster --server="$intapi" --certificate-authority="$ca_crt" --embed-certs >/dev/null
+          kubectl config set-context kubelet --cluster="$cluster" --user="kubelet" >/dev/null
+          kubectl config use-context kubelet >/dev/null
+          cat "$KUBECONFIG"
+
+    - name: create kubeconfig
+      command: /root/restore_kubeconfig.sh > /root/kubeconfig
+
+    - name: fetch kubeconfig
+      fetch:
+        src: /root/kubeconfig
+        dest: ../files/kubeconfig
+        flat: yes
+
+    - name: Get the CA certificate used to validate connections from the API server.
+      shell: oc get configmap kube-apiserver-to-kubelet-client-ca -n openshift-kube-apiserver-operator --template='\{\{ index .data "ca-bundle.crt" \}\}' > /etc/kubernetes/ca.crt
+
+    - name: fetch cert
+      fetch:
+        src: /etc/kubernetes/ca.crt
+        dest: ../files/ca.crt
+
+- name: put files on all masters and recover the kublet
+  hosts: control_plane
+  gather_facts: false
+  become: yes
+
+  tasks:
+    - name: copy kubeconfig
+      copy:
+        src: ../files/kubeocnfig
+        dest: /etc/kubernetes/kubeconfig
+
+    - name: copy ca.crt
+      copy:
+        src: ../files/ca.crt
+        dest: /etc/kubernetes/ca.crt
+
+    - name: bounce kublet
+      shell: |
+        systemctl stop kubelet
+        rm -rf /var/lib/kubelet/pki /var/lib/kubelet/kubeconfig
+        systemctl start kubelet
+
+- name: try "oc get nodes" to see if workers are restored - if theres any NotReady, then 
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: oc get nodes
+      k8s:
+        config: ../files/kubeconfig
+        command: get nodes
+      register: badnodes
+
+- name: fix badnodes
+  hosts: workers
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: bounce the kublet
+      shell: |
+        systemctl stop kubelet
+        rm -rf /var/lib/kubelet/pki /var/lib/kubelet/kubeconfig
+        systemctl start kubelet
+
+- name: resolve all pending CSRs
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: resolve all CSRs
+      command: oc get csr -o name --config ../files/kubeconfig | xargs oc --config ../files/kubeconfig adm certificate approve 
+
+# wait 10 minutes
