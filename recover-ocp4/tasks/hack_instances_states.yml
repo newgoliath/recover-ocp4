@@ -19,18 +19,6 @@
       ec2:
         instance_ids: "{{ item.instance_id }}"
         state: "{{ state }}"
-        #region: "us-east-2"
+        region: "us-east-2"
       loop: "{{ ec2.instances }} "
-
-    - name: deploy a jump instance
-      # must use a well known key
-
-    - name: scp cluster key to the jump instance
-      loop:
-        - $HOME/.ssh/cluster-NNNN
-
-    - name: setup ssh config
-       
-    - name: set in ansible as jump instance
-
 
