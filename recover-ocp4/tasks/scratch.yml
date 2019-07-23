@@ -19,3 +19,6 @@
     when: jumpbox_exists["instances"]|length==1
 
 
+  - name: openshift node status
+    set_fact:
+      nodes: "{{ lookup('k8s', kind='Node') }}"

@@ -1,19 +1,17 @@
 ---
 
-- name: Create Jumpbox 
+- name: Gather Info about AWS
   hosts: localhost
   gather_facts: false
   vars:
     cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ lookup('env', 'GUID') }}-key.pub"
-    cluster_region: "us-east-2"
-    cluster_vpc: "vpc-04ed4285a2858ac00"
     GUID: "{{ lookup('env', 'GUID') }}"
     HOME: "{{ lookup('env', 'HOME') }}"
     ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
 
   tasks:
 
-    - name: get control plane
+    - name: get control plane nodes
       ec2_instance_facts:
         filters:
           "tag:Name": "*master*"
@@ -25,6 +23,26 @@
         groups: control_plane
       loop: "{{ control_plane.instances }}"
       when: control_plane.instances[0] is defined
+
+    - name: get cluster vpc ID
+      set_fact:
+        cluster_vpc: "{{ control_plane.instances[0].vpc_id }}"
+        cluster_region: "{{ control_plane.instances[0].placement.availability_zone }}"
+      when: control_plane.instances[0] is defined
+
+
+    - name: get workers
+      ec2_instance_facts:
+        filters:
+          "tag:Name": "*worker*"
+      register: workers
+
+    - name: add workers to inventory
+      add_host:
+        name: "{{ item.private_dns_name }}"
+        groups: workers
+      loop: "{{ workers.instances }}"
+      when: workers.instances[0] is defined
 
     - name: is there a jumpbox?
       ec2_instance_facts:
@@ -187,7 +205,7 @@
   become: yes
   vars:
     KAO_IMAGE: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:608d15862ef994bded9e3c0d6ab3c6bb9a6e583ec6a40bd83a847f19c9a927ac
-    RECOVERY_KUBEAPI: /etc/kubernetes/static-pod-resources/recovery-kube-apiserver-pod/admin.kubeconfig
+    RECOVERY_KUBECONFIG: /etc/kubernetes/static-pod-resources/recovery-kube-apiserver-pod/admin.kubeconfig
 
   tasks:
     - name: hostname
@@ -204,9 +222,11 @@
     - name: create a recovery API server
       command: podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator "{{ KAO_IMAGE }}" recovery-apiserver create
       register: recovery_kubeconfig
+      args:
+        creates: /etc/kubernetes/static-pod-resources/recovery-kube-apiserver-pod
 
     - name: wait for recovery API
-      command: oc get namespace kube-system --config {{ RECOVERY_KUBEAPI }}  2>dev/null
+      command: oc --config {{ RECOVERY_KUBECONFIG }} get namespace kube-system 
       register: result
       until: result.stdout.find("Active") != -1
       retries: 100
@@ -215,14 +235,18 @@
     - name: Run the regenerate-certificates command. It fixes the certificates in the API, overwrites the old certificates on the local drive, and restarts static Pods to pick them up.
       command: "podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator {{ KAO_IMAGE }} regenerate-certificates"
 
-    - name: After the certificates are fixed in the API, use the following commands to force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer. 1/3
-      shell: oc patch kubeapiserver cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"} }' --type=merge --config {{ RECOVERY_KUBEAPI }} 
+      # force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer. 1/3
+    - name: force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer
+      shell: |
+          oc patch kubeapiserver cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"} }' --type=merge --config {{ RECOVERY_KUBECONFIG }} 
 
-    - name: 2/3
-      shell: oc patch kubecontrollermanager cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge --config {{ RECOVERY_KUBEAPI }}  
+    - name: force redeploy 2
+      shell: |
+        oc patch kubecontrollermanager cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge --config {{ RECOVERY_KUBECONFIG }}  
 
-    - name: 3/3
-      shell: oc patch kubescheduler cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge --config {{ RECOVERY_KUBEAPI }} 
+    - name: force redeploy 3
+      shell: |
+        oc patch kubescheduler cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge --config {{ RECOVERY_KUBECONFIG }} 
 
     - name: create empty script
       file:
@@ -231,12 +255,12 @@
         mode: 755
 
     - name: create script
-      file:
-        dest: "/root/restore_kubeconfig.sh"
+      blockinfile:
+        dest: /root/restore_kubeconfig.sh
         marker: "#### {mark}"
         content: |
           #!/bin/bash
-          
+          export KUBECONFIG={{ RECOVERY_KUBECONFIG }}
           set -eou pipefail
           
           # context
@@ -259,7 +283,8 @@
           cat "$KUBECONFIG"
 
     - name: create kubeconfig
-      command: /root/restore_kubeconfig.sh > /root/kubeconfig
+      shell: |
+        /root/restore_kubeconfig.sh > /root/kubeconfig
 
     - name: fetch kubeconfig
       fetch:
@@ -268,12 +293,14 @@
         flat: yes
 
     - name: Get the CA certificate used to validate connections from the API server.
-      shell: oc get configmap kube-apiserver-to-kubelet-client-ca -n openshift-kube-apiserver-operator --template='\{\{ index .data "ca-bundle.crt" \}\}' > /etc/kubernetes/ca.crt
+      shell: |
+        oc --config {{ RECOVERY_KUBECONFIG }} {% raw %} get configmap kube-apiserver-to-kubelet-client-ca -n openshift-kube-apiserver-operator --template='{{ index .data "ca-bundle.crt" }}' > /etc/kubernetes/ca.crt {% endraw %}
 
     - name: fetch cert
       fetch:
         src: /etc/kubernetes/ca.crt
         dest: ../files/ca.crt
+        flat: yes
 
 - name: put files on all masters and recover the kublet
   hosts: control_plane
@@ -283,7 +310,7 @@
   tasks:
     - name: copy kubeconfig
       copy:
-        src: ../files/kubeocnfig
+        src: ../files/kubeconfig
         dest: /etc/kubernetes/kubeconfig
 
     - name: copy ca.crt
@@ -297,17 +324,24 @@
         rm -rf /var/lib/kubelet/pki /var/lib/kubelet/kubeconfig
         systemctl start kubelet
 
-- name: try "oc get nodes" to see if workers are restored - if theres any NotReady, then 
-  hosts: localhost
+
+- name: is control plane running?
+  hosts: control_plane[0]
   gather_facts: false
+  vars:
+    RECOVERY_KUBECONFIG: /etc/kubernetes/static-pod-resources/recovery-kube-apiserver-pod/admin.kubeconfig
+  become: yes
 
   tasks:
 
     - name: oc get nodes
-      k8s:
-        config: ../files/kubeconfig
-        command: get nodes
-      register: badnodes
+      shell: |
+        oc --config {{ RECOVERY_KUBECONFIG }} get nodes
+      register: result
+      until: result.stdout.find("NotReady") == -1
+      retries: 100
+      delay: 10
+
 
 - name: fix badnodes
   hosts: workers
