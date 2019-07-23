@@ -1,7 +1,22 @@
 ---
+- name: Install prereq package
+  become: true
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: get prereq python2-boto and python2-boto3 packages
+      become: true
+      yum:
+        state: latest
+        name: "{{ packages }}"
+      vars:
+        packages:
+          - python2-boto 
+          - python2-boto3
 
 - name: Gather Info about AWS
   hosts: localhost
+  connection: local
   gather_facts: false
   vars:
     cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ lookup('env', 'GUID') }}-key.pub"
@@ -10,6 +25,7 @@
     ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
 
   tasks:
+
 
     - name: get control plane nodes
       ec2_instance_facts:
@@ -27,7 +43,8 @@
     - name: get cluster vpc ID
       set_fact:
         cluster_vpc: "{{ control_plane.instances[0].vpc_id }}"
-        cluster_region: "{{ control_plane.instances[0].placement.availability_zone }}"
+        # chop off the last character
+        cluster_region: "{{ control_plane.instances[0].placement.availability_zone| regex_replace('.$') }}"
       when: control_plane.instances[0] is defined
 
 
@@ -124,6 +141,7 @@
       file:
         dest: "{{ ssh_config }}"
         state: touch
+        mode: 0600
 
     - name: setup clientvm ssh config
       blockinfile:
@@ -132,10 +150,12 @@
         content: |
           Host {{ jumpboxes.instances[0].public_ip_address }}
             User ec2-user
+            StrictHostKeyChecking no
 
           Host *.internal
             User core
             ProxyJump {{ jumpboxes.instances[0].public_ip_address }}
+            StrictHostKeyChecking no
 
           Match User ec2-user
             IdentityFile ~/.ssh/cluster-{{ GUID }}-key

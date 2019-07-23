@@ -1,8 +1,9 @@
 ---
 # tasks file for recover-ocp4
 
+# ansible-playbook -e [ running | stopped ] ./hack_infrastructure_states.yml
 
-- name: Heal A cluster
+- name: Start or Stop A cluster
   hosts: localhost
 
   tasks:

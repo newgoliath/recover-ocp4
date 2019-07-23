@@ -1,0 +1,21 @@
+---
+
+- name: check certs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+  - name: get MASTER_API
+    shell: |
+      oc status | awk -F"//" '/on server https/ {print $2}' 
+    register: MASTER_API
+
+  - name: get cert dates
+    shell: |
+      openssl s_client -connect {{ MASTER_API.stdout }} | openssl x509 -noout -dates
+    register: result
+
+  - name: output dates
+    debug:
+      msg: "{{ result.stdout }}"
