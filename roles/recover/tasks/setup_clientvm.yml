@@ -1,0 +1,26 @@
+---
+
+
+
+- name: test ansible version
+  assert:
+    that: "ansible_version.full is version_compare('2.8', '>=')"
+    msg: >
+      "You must update Ansible to at least 2.8.  run 'sudo yum -y install ansible'"
+
+- name: Gather rpm facts
+  package_facts:
+    manager: auto
+
+#    - name: rpm facts
+#      debug:
+#        var: ansible_facts.packages
+
+- name: get prereq python2-boto and python2-boto3 packages
+  become: yes
+  yum:
+    state: present
+    name: "{{ item }}"
+  loop: [ 'python2-boto','python2-boto3' ]
+  #when: my_packages not in ansible_facts.packages|dict2items
+

@@ -1,5 +1,5 @@
 ---
-- name: Install prereq package
+- name: Install prereq packages
   become: true
   hosts: localhost
   connection: local
@@ -32,7 +32,6 @@
 
   tasks:
 
-
     - name: get control plane nodes
       ec2_instance_facts:
         filters:
@@ -52,7 +51,6 @@
         # chop off the last character
         cluster_region: "{{ control_plane.instances[0].placement.availability_zone| regex_replace('.$') }}"
       when: control_plane.instances[0] is defined
-
 
     - name: get workers
       ec2_instance_facts:

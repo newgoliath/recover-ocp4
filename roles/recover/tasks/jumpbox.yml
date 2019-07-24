@@ -1,0 +1,188 @@
+---
+- name: setup jumpbox
+  hosts: localhost
+  connection: local
+  vars:
+    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ lookup('env', 'GUID') }}-key.pub"
+    GUID: "{{ lookup('env', 'GUID') }}"
+    HOME: "{{ lookup('env', 'HOME') }}"
+    ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"  
+    aws_region: "us-east-2"
+
+  tasks:
+
+  - name: clientvm setup
+    include_tasks:
+      file: ./setup_clientvm.yml
+
+  - name: add aws hosts to inventory
+    include_tasks:
+      file: ./aws_inventory.yml
+
+#  - name: add existing jumpbox to inventory
+#    add_host:
+#      name: "{{ jumpboxes.instances[0].public_ip_address }}"
+#      groups: jumpbox
+#    when: jumpboxes.instances[0] is defined
+
+# if there's no jumpbox already..
+  - name: setup jumpbox
+    block:
+
+    - name: Put the cluster keypair in AWS for jumphost
+      ec2_key:
+        name: cluster_keypair
+        key_material: "{{ lookup('file', cluster_key_filename) }}"
+
+    - name: Create SSH security group
+      ec2_group:
+        name: jumpbox
+        description: jumpbox description
+        region: "{{ cluster_region }}"
+        vpc_id: "{{ cluster_vpc }}"
+        rules:
+          - proto: tcp
+            ports: 22
+            cidr_ip: 0.0.0.0/0
+      register: sg_jumpbox
+
+    - name: get vpc_subnet_id
+      ec2_vpc_subnet_facts:
+        filters:
+          vpc-id: "{{ sg_jumpbox.vpc_id }}"
+          cidr-block: "10.0.0.0/20"
+      register: ec2_vpc_subnet_ids
+
+    - name: launch ec2 instance
+      ec2:
+        # name: "jumpbox"
+        key_name: "cluster_keypair"
+        vpc_subnet_id: "{{ ec2_vpc_subnet_ids.subnets[0].subnet_id }}"
+        instance_type: t2.micro
+        group_id: "{{ sg_jumpbox.group_id }}"
+        #security_group: "{{ sg_jumpbox.group_id }}"
+        #security_group: "jumpbox"
+        #image_id: ami-0520e698dd500b1d1
+        image: ami-0520e698dd500b1d1
+        region: "{{ cluster_region }}"
+        assign_public_ip: true
+        instance_tags:
+          type: jumpbox
+        wait: true
+      register: jumpbox
+
+    - name: debug me
+      debug:
+        var: jumpbox
+
+    - name: Add jumpbox instance public IP to host group
+      add_host:
+        name: "{{ jumpbox.instances[0].public_ip }}"
+        groups: jumpbox
+
+    - name: delete clientvm ssh config
+      file:
+        dest: "{{ ssh_config }}"
+        state: absent
+
+    - name: create empty ssh config
+      file:
+        dest: "{{ ssh_config }}"
+        state: touch
+        mode: 0600
+
+    - name: setup clientvm ssh config
+      blockinfile:
+        dest: "{{ ssh_config }}"
+        marker: "##### {mark} Adding masters with ProxyJump"
+        content: |
+          Host {{ jumpbox.instances[0].public_ip }}
+            User ec2-user
+            StrictHostKeyChecking no
+
+          Host *.internal
+            User core
+            ProxyJump {{ jumpbox.instances[0].public_ip }}
+            StrictHostKeyChecking no
+
+          Match User ec2-user
+            IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+            StrictHostKeyChecking no
+
+          Match User core
+            IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+            StrictHostKeyChecking no
+
+          Host *
+            ControlMaster auto
+            ControlPath /tmp/%h-%r
+            ControlPersist 5m
+            StrictHostKeyChecking no
+
+    - name: Wait for SSH to come up
+      delegate_to: "{{ jumpbox.instances[0].public_ip }}"
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+    when: jumpboxes["instances"][0] is not defined
+
+  - name: add existing jumpbox to inventory
+    add_host:
+      name: "{{ jumpboxes.instances[0].public_ip_address }}"
+      groups: jumpbox
+    when: jumpboxes.instances[0] is defined
+
+
+- name: prep jumpbox
+  hosts: jumpbox
+  vars:
+    GUID: "{{ lookup('env', 'GUID') }}"
+    HOME: "{{ lookup('env', 'HOME') }}"
+    ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
+  tasks:
+
+  - name: put kubeconfig on jumpbox
+    copy:
+      src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
+      dest: "{{ ansible_env.HOME }}/kubeconfig"
+
+  - name: copy cluster ssh key to jumpbox
+    copy:
+      src: "{{ HOME }}/.ssh/cluster-{{ GUID }}-key"
+      dest: "{{ ansible_env.HOME }}/.ssh/"
+      mode: 0600
+
+  - name: delete jumpbox ssh config
+    file:
+      dest: "{{ ssh_config }}"
+      state: absent
+
+  - name: create empty ssh config
+    file:
+      dest: "{{ ssh_config }}"
+      state: touch
+      mode: 0600
+
+  - name: setup ssh config on jumpbox
+    blockinfile:
+      dest: "{{ ssh_config }}"
+      marker: "##### {mark} ADD default key and user"
+      content: |
+        Host *
+          IdentityFile {{ ansible_env.HOME }}/.ssh/cluster-{{ GUID }}-key
+          User core
+          StrictHostKeyChecking no
+          ControlPath /tmp/{{ GUID }}-%r-%h-%p
+          ControlPersist 5m
+
+  - name: show jumpbox info
+    debug:
+      #var: groups["jumpbox"].host_name
+      msg:
+       - "SSH to Jumpbox: ssh {{ groups['jumpbox'][0] }}"
+       - "SSH to Master: ssh {{ groups['control_plane'][0] }}"
+
+
+
+
