@@ -20,7 +20,7 @@
 
 
 .July 24
-* fresh certs: 0ef8                                                                   Serial Number: 451056269819580937 (0x6427949a04f1209)
+* fresh certs: 0ef8                                              2019-07-24T16:20:01Z Serial Number: 451056269819580937 (0x6427949a04f1209)
 
 == Solution Discussion
 
