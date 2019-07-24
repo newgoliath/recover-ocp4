@@ -1,0 +1,471 @@
+= Broken Certs
+
+== Cert Issue Solution Options:
+
+* Prevent Cert expiration
+- on-going emails with devs
+
+* Provide new certs
+- on pause
+
+* DR Recover broken cluster 4.1
+- Playbookx in development
+
+* break fix cluster: 5f68.sandbox55.opentlc.com"
+* regen certs cluster: fe0e.sandbox85.internal
+* shutdown, wait and see cluster: 9d72.sandbox295.opentlc.com"
+
+
+=== Break the Cluster and fix
+==== Sha process based on eric R and Mike H
+
+#0. Check starting point of API cert
+MASTER_API=`oc status | grep "on server https" | awk -F"//" '{print $2}'`
+echo $MASTER_API
+
+openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+
+#1.  Delete existing unsupported-cert-rotation-config if it exists.
+oc delete -n openshift-config configmap unsupported-cert-rotation-config
+
+#2. 30s x 30 = 900s = 15 minutes rotation set
+# 60s x 30 = 1800s = 30 minutes rotation set
+oc create -n openshift-config configmap unsupported-cert-rotation-config --from-literal='base=10s'
+
+### Should we do step 4 before step 3?
+
+#3. Kill pods to force their rotation
+oc get pod -A -o json | jq -r '.items[] | "-n \(.metadata.namespace) \(.metadata.name)"' | xargs -n3 oc delete pod --force --grace-period=0
+
+
+outcome:
+
+openshift-kube-apiserver-operator   0s    Normal   SignerUpdateRequired   deployment/kube-apiserver-operator   "kube-control-plane-signer" in "openshift-kube-apiserver-operator" requires a new signing cert/key pair: past its refresh time 2019-07-22 22:13:58 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   TargetUpdateRequired   deployment/kube-apiserver-operator   "kubelet-client" in "openshift-kube-apiserver" requires a new target cert/key pair: past its refresh time 2019-07-22 22:21:42 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   TargetUpdateRequired   deployment/kube-apiserver-operator   "service-network-serving-certkey" in "openshift-kube-apiserver" requires a new target cert/key pair: past its refresh time 2019-07-22 22:21:42 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   TargetUpdateRequired   deployment/kube-apiserver-operator   "localhost-serving-cert-certkey" in "openshift-kube-apiserver" requires a new target cert/key pair: past its refresh time 2019-07-22 22:21:43 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   SignerUpdateRequired   deployment/kube-apiserver-operator   "aggregator-client-signer" in "openshift-kube-apiserver-operator" requires a new signing cert/key pair: past its refresh time 2019-07-22 22:06:24 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   SignerUpdateRequired   deployment/kube-apiserver-operator   "kube-control-plane-signer" in "openshift-kube-apiserver-operator" requires a new signing cert/key pair: past its refresh time 2019-07-22 22:13:58 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   TargetUpdateRequired   deployment/kube-apiserver-operator   "external-loadbalancer-serving-certkey" in "openshift-kube-apiserver" requires a new target cert/key pair: past its refresh time 2019-07-22 22:21:43 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   TargetUpdateRequired   deployment/kube-apiserver-operator   "internal-loadbalancer-serving-certkey" in "openshift-kube-apiserver" requires a new target cert/key pair: past its refresh time 2019-07-22 22:21:41 +0000 UTC
+openshift-kube-apiserver-operator   0s    Normal   SignerUpdateRequired   deployment/kube-apiserver-operator   "kube-control-plane-signer" in "openshift-kube-apiserver-operator" requires a new signing cert/key pair: past its refresh time 2019-07-22 22:13:58 +0000 UTC
+
+openshift-kube-controller-manager-operator   16s   Normal   OperatorStatusChanged   namespace/openshift-kube-controller-manager-operator   Status for clusteroperator/kube-controller-manager changed: Degraded message changed from "" to "StaticPodsDegraded: nodes/ip-10-0-165-119.us-east-2.compute.internal pods/kube-controller-manager-ip-10-0-165-119.us-east-2.compute.internal container=\"kube-controller-manager-5\" is not ready\nStaticPodsDegraded: nodes/ip-10-0-165-119.us-east-2.compute.internal pods/kube-controller-manager-ip-10-0-165-119.us-east-2.compute.internal container=\"kube-controller-manager-cert-syncer-5\" is not ready"
+openshift-controller-manager-operator   16s   Normal   OperatorStatusChanged   deployment/openshift-controller-manager-operator   Status for operator openshift-controller-manager changed: Progressing changed from True to False ("")
+
+#4. Update secrets (We should check them before and after, I'm not sure this works)
+# finds all secrets with a certificate-not-after annotation and patches them with 'null'
+
+oc get secret -A -o json | jq -r '.items[] | select(.metadata.annotations."auth.openshift.io/certificate-not-after" | .!=null and fromdateiso8601<='$( date --date='+1year' +%s )') | "-n \(.metadata.namespace) \(.metadata.name)"' | xargs -n3 oc patch secret -p='{"metadata": {"annotations": {"auth.openshift.io/certificate-not-after": null}}}'
+
+#x+1. Check the apiserver serving cert validity - after our change.
+openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+
+api.cluster-2282.sandbox545.opentlc.com:6443
+getaddrinfo: Servname not supported for ai_socktype
+connect:errno=0
+unable to load certificate
+140263960090512:error:0906D06C:PEM routines:PEM_read_bio:no start line:pem_lib.c:707:Expecting: TRUSTED CERTIFICATE
+
+
+
+# remove the extra short cert-rotation-config
+oc delete -n openshift-config configmap unsupported-cert-rotation-config
+
+
+
+
+#x+1. Check the apiserver serving cert validity - after our change.
+openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+
+# one of the workers is now "NotReady" but the masters are OK-ish.  oc logs fails.
+
+== Method: refresh certs 
+
+This is connected to Bug 1728136 and meant to be a stop gap until documentation can be provided to document the minimum 24hr life of a cluster.
+
+If your customer can't destroy the cluster and recreate an option to restore the cluster might be to do the following:
+
+Create a new kubeconfig files
+
+Raw
+# oc serviceaccounts create-kubeconfig -n openshift-machine-config-operator node-bootstrapper > kubeconfig 
+Replace /etc/kubernetes/kubeconfig with this newly created file on all nodes.
+
+Example: if you have ssh access which likely you do not:
+Raw
+# scp ./kubeconfig  NODE_HOSTNAME:/etc/kubernetes/kubeconfig
+Without direct ssh access, you will need to create a bastion host to remote to so that you can then copy files to the node.
+After replacing this file remove the existing kubeconfig and certs then restart the kubelet service on the nodes. [2]
+
+Raw
+# rm  /var/lib/kubelet/pki/kubelet-* /var/lib/kubelet/kubeconfig
+# systemctl restart kubelet 
+Approve 2 CSRs for the node using your admin credentials:
+
+Raw
+# oc get csr -o name | xargs oc adm certificate approve
+Wait 1-2 minutes and run again, this will be successful when you see an additional CSR outputted.
+Raw
+# oc get csr -o name | xargs oc adm certificate approve
+https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet-tls-bootstrapping/#kubelet-configuration
+
+== DR Docs from docs.openshift.com
+
+
+https://docs.openshift.com/container-platform/4.1/disaster_recovery/scenario-3-expired-certs.html
+
+// Module included in the following assemblies:
+//
+// * disaster_recovery/scenario-3-expired-certs.adoc
+
+[id="dr-scenario-3-recovering-expired-certs_{context}"]
+= Recovering from expired control plane certificates
+
+Follow this procedure to recover from a situation where your control plane certificates have expired.
+
+.Prerequisites
+
+* SSH access to master hosts.
+
+.Procedure
+
+. Access a master host with an expired certificate as the root user.
+
+. Obtain the `cluster-kube-apiserver-operator` image reference for a release.
++
+----
+# RELEASE_IMAGE=<release_image> <1>
+----
+<1> An example value for `<release_image>` is `quay.io/openshift-release-dev/ocp-release:4.1.0`.
++
+----
+# KAO_IMAGE=$( oc adm release info --registry-config='/var/lib/kubelet/config.json' "${RELEASE_IMAGE}" --image-for=cluster-kube-apiserver-operator )
+----
+
+. Pull the `cluster-kube-apiserver-operator` image.
++
+----
+# podman pull --authfile=/var/lib/kubelet/config.json "${KAO_IMAGE}"
+----
+
+. Create a recovery API server.
++
+----
+# podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator "${KAO_IMAGE}" recovery-apiserver create
+----
+
+. Run the `export KUBECONFIG` command from the output of the above command, which is needed for the `oc` commands later in this procedure.
++
+----
+# export KUBECONFIG=/<path_to_recovery_kubeconfig>/admin.kubeconfig
+----
+
+. Wait for the recovery API server to come up.
++
+----
+# until oc get namespace kube-system 2>/dev/null 1>&2; do echo 'Waiting for recovery apiserver to come up.'; sleep 1; done
+----
+
+. Run the `regenerate-certificates` command. It fixes the certificates in the API, overwrites the old certificates on the local drive, and restarts static Pods to pick them up.
++
+----
+# podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator "${KAO_IMAGE}" regenerate-certificates
+----
+
+. After the certificates are fixed in the API, use the following commands to force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer.
++
+----
+# oc patch kubeapiserver cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge
+----
++
+----
+# oc patch kubecontrollermanager cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge
+----
++
+----
+# oc patch kubescheduler cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge
+----
+
+. Create a bootstrap kubeconfig with a valid user.
+
+.. Create a file called `restore_kubeconfig.sh` with the following contents.
++
+----
+#!/bin/bash
+
+set -eou pipefail
+
+# context
+intapi=$(oc get infrastructures.config.openshift.io cluster -o "jsonpath={.status.apiServerURL}")
+context="$(oc config current-context)"
+# cluster
+cluster="$(oc config view -o "jsonpath={.contexts[?(@.name==\"$context\")].context.cluster}")"
+server="$(oc config view -o "jsonpath={.clusters[?(@.name==\"$cluster\")].cluster.server}")"
+# token
+ca_crt_data="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token -o "jsonpath={.data.ca\.crt}" | base64 --decode)"
+namespace="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token  -o "jsonpath={.data.namespace}" | base64 --decode)"
+token="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token -o "jsonpath={.data.token}" | base64 --decode)"
+
+export KUBECONFIG="$(mktemp)"
+kubectl config set-credentials "kubelet" --token="$token" >/dev/null
+ca_crt="$(mktemp)"; echo "$ca_crt_data" > $ca_crt
+kubectl config set-cluster $cluster --server="$intapi" --certificate-authority="$ca_crt" --embed-certs >/dev/null
+kubectl config set-context kubelet --cluster="$cluster" --user="kubelet" >/dev/null
+kubectl config use-context kubelet >/dev/null
+cat "$KUBECONFIG"
+----
+
+.. Make the script executable.
++
+----
+# chmod +x restore_kubeconfig.sh
+----
+
+.. Execute the script and save the output to a file called `kubeconfig`.
++
+----
+# ./restore_kubeconfig.sh > kubeconfig
+----
+
+.. Copy the `kubeconfig` file to all master hosts and move it to `/etc/kubernetes/kubeconfig`.
+
+.. Get the CA certificate used to validate connections from the API server.
++
+----
+# oc get configmap kube-apiserver-to-kubelet-client-ca -n openshift-kube-apiserver-operator --template='{{ index .data "ca-bundle.crt" }}' > /etc/kubernetes/ca.crt
+----
+
+.. Copy the `/etc/kubernetes/ca.crt` file to all other master hosts and nodes.
+
+. Recover the kubelet on all masters.
+
+.. On a master host, stop the kubelet.
++
+----
+# systemctl stop kubelet
+----
+
+.. Delete stale kubelet data.
++
+----
+# rm -rf /var/lib/kubelet/pki /var/lib/kubelet/kubeconfig
+----
+
+.. Restart the kubelet.
++
+----
+# systemctl start kubelet
+----
+
+.. Repeat these steps on all other master hosts.
+
+. If necessary, recover the kubelet on the worker nodes.
++
+After the master nodes are restored, the worker nodes might restore themselves. You can verify this by running the `oc get nodes` command. If the worker nodes are not listed, then perform the following steps on each worker node.
++
+.. Stop the kubelet.
++
+----
+# systemctl stop kubelet
+----
+
+.. Delete stale kubelet data.
++
+----
+# rm -rf /var/lib/kubelet/pki /var/lib/kubelet/kubeconfig
+----
+
+.. Restart the kubelet.
++
+----
+# systemctl start kubelet
+----
+
+. Approve the pending `node-bootstrapper` certificates signing requests (CSRs).
+
+.. Get the list of current CSRs.
++
+----
+# oc get csr
+----
+
+.. Review the details of a CSR to verify it is valid.
++
+----
+# oc describe csr <csr_name> <1>
+----
+<1> `<csr_name>` is the name of a CSR from the list of current CSRs.
+
+.. Approve each valid CSR.
++
+----
+# oc adm certificate approve <csr_name>
+----
++
+Be sure to approve all pending `node-bootstrapper` CSRs.
+
+. Destroy the recovery API server because it is no longer needed.
++
+----
+# podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator "${KAO_IMAGE}" recovery-apiserver destroy
+----
++
+Wait for the control plane to restart and pick up the new certificates. This might take up to 10 minutes.
+
+
+== Cluster fe0e https://console-openshift-console.apps.cluster-5f68.sandbox55.opentlc.com
+
+[source]
+----
+immediately after install:
+
+
+$ openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 19:27:47 2019 GMT
+notAfter=Aug 22 19:27:48 2019 GMT
+
+$ oc create -n openshift-config configmap unsupported-cert-rotation-config --from-literal='base=30s'
+configmap/unsupported-cert-rotation-config created
+[jmaltin-redhat.com@clientvm 0 ~]$ openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 19:27:47 2019 GMT
+notAfter=Aug 22 19:27:48 2019 GMT
+
+$ oc get clusterversions.config.openshift.io
+NAME      VERSION   AVAILABLE   PROGRESSING   SINCE   STATUS
+version   4.1.6     True        False         151m    Cluster version is 4.1.6
+
+# delete all pods
+$ oc get pod -A -o json | jq -r '.items[] | "-n \(.metadata.namespace) \(.metadata.name)"' | xargs -n3 oc delete pod --force --grace-period=0
+
+
+$ openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 22:14:35 2019 GMT
+notAfter=Jul 23 22:29:36 2019 GMT
+
+# force rotation
+$ oc get secret -A -o json | jq -r '.items[] | select(.metadata.annotations."auth.openshift.io/certificate-not-after" | .!=null and fromdateiso8601<='$( date --date='+1year' +%s )') | "-n \(.metadata.namespace) \(.metadata.name)"' | xargs -n3 oc patch secret -p='{"metadata": {"annotations": {"auth.openshift.io/certificate-not-after": null}}}'
+
+$ openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 22:24:31 2019 GMT
+notAfter=Jul 23 22:39:32 2019 GMT
+
+time 22:26
+
+$ oc delete -n openshift-config configmap unsupported-cert-rotation-config
+
+stopped VMs at Tue Jul 23 22:42:23 UTC 2019
+
+start VMs at 23:00
+
+started VMs at 23:20
+
+Make sure the certs are expired (e.g. the apiserver should serve invalid certs)
+
+
+$ eopenssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 22:39:34 2019 GMT
+notAfter=Jul 23 22:54:35 2019 GMT
+
+$ oc whoami
+Unable to connect to the server: x509: certificate has expired or is not yet valid
+
+get a release image from another cluster that's OK of the similar version:
+
+$ oc adm release info | awk '/Pull From:/ { print $3 }'
+
+export RELEASE_IMAGE=quay.io/openshift-release-dev/ocp-release:4.1.6
+oc adm release info --registry-config='/var/lib/kubelet/config.json' "${RELEASE_IMAGE}" --image-for=cluster-kube-apiserver-operator
+quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:5a5b26982e0d194b678238faf9485531e32c2d2716eb9e96cde77b11f05f71e7
+
+
+launch jumpbox
+
+ssh to jumpbox
+
+ssh to master (get private IP from aws)
+
+
+
+
+----
+
+
+== Cluster 2, just regen certs https://console-openshift-console.apps.cluster-fe0e.sandbox85.opentlc.com
+
+[source]
+----
+
+$ oc serviceaccounts create-kubeconfig -n openshift-machine-config-operator node-bootstrapper > kubeconfig
+
+# setup a jumpbox
+
+oc get nodes
+
+ip-10-0-133-225.us-east-2.compute.internal   Ready    worker   3h40m   v1.13.4+c9e4f28ff
+ip-10-0-139-129.us-east-2.compute.internal   Ready    master   3h46m   v1.13.4+c9e4f28ff
+ip-10-0-147-198.us-east-2.compute.internal   Ready    master   3h46m   v1.13.4+c9e4f28ff
+ip-10-0-149-55.us-east-2.compute.internal    Ready    worker   3h41m   v1.13.4+c9e4f28ff
+ip-10-0-160-222.us-east-2.compute.internal   Ready    master   3h46m   v1.13.4+c9e4f28ff
+ip-10-0-161-7.us-east-2.compute.internal     Ready    worker   3h41m   v1.13.4+c9e4f28ff
+
+# Replace /etc/kubernetes/kubeconfig with this newly created file on all nodes.
+# Setup an inventory of all the nodes
+$ oc get nodes > ~/inventory
+
+# clean up inventory, add [nodes] section
+
+$ ansible -b -i ~/inventory nodes -m copy -a 'src=/home/jmaltin-redhat.com/kubeconfig dest=/etc/kubernetes/kubeconfig'
+
+
+# After replacing this file remove the existing kubeconfig and certs then restart the kubelet service on the nodes. [2]
+
+# Raw
+# rm  /var/lib/kubelet/pki/kubelet-* /var/lib/kubelet/kubeconfig
+# systemctl restart kubelet 
+
+# Ansible:
+$ ansible -b -i ~/inventory nodes -m shell -a 'rm /var/lib/kubelet/pki/kubelet-* /var/lib/kubelet/kubeconfig'
+$ ansible -b -i ~/inventory nodes -m shell -a 'ls /var/lib/kubelet/pki/kubelet-* /var/lib/kubelet/kubeconfig'
+$ ansible -b -i ~/inventory nodes -m shell -a 'systemctl restart kubelet'
+
+
+# Approve 2 CSRs for the node using your admin credentials:
+
+$ oc get csr
+NAME        AGE   REQUESTOR                                                                   CONDITION
+csr-4g9ts   68s   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   Pending
+csr-4ml54   68s   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   Pending
+csr-cd87c   68s   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   Pending
+csr-fcct7   67s   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   Pending
+csr-mbcc9   65s   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   Pending
+csr-z42wd   67s   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   Pending
+
+
+Raw
+# oc get csr -o name | xargs oc adm certificate approve
+Wait 1-2 minutes and run again, this will be successful when you see an additional CSR outputted.
+Raw
+# oc get csr -o name | xargs oc adm certificate approve
+https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet-tls-bootstrapping/#kubelet-configuration
+
+
+$ openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 19:08:54 2019 GMT
+notAfter=Aug 22 19:08:55 2019 GMT
+
+Same certs :(  notBefore is too early
+
+----
