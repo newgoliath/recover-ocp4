@@ -11,10 +11,20 @@
 * DR Recover broken cluster 4.1
 - Playbookx in development
 
-* break fix cluster: 5f68.sandbox55.opentlc.com"
-* regen certs cluster: fe0e.sandbox85.internal
-* shutdown, wait and see cluster: 9d72.sandbox295.opentlc.com"
+== Cluster List
 
+.July 23
+* break fix cluster: 5f68.sandbox55.opentlc.com"                 2019-07-23T19:38:49Z Serial Number: 8483588535740013578 (0x75bbc2d3455c1c0a)
+* regen certs cluster: fe0e.sandbox85.internal                   2019-07-23T19:31:23Z Serial Number: 3938497004743880440 (0x36a85a28a4b2eef8)
+* shutdown, wait and see cluster: 9d72.sandbox295.opentlc.com"   2019-07-23T22:47:16Z Serial Number: 8870908118152368960 (0x7b1bcbeef199d340)
+
+
+.July 24
+* fresh certs: 0ef8                                                                   Serial Number: 451056269819580937 (0x6427949a04f1209)
+
+== Solution Discussion
+
+New install.  Boostrap cert set to expire in 24 hours.  If you set this sooner, you brea
 
 === Break the Cluster and fix
 ==== Sha process based on eric R and Mike H
@@ -314,7 +324,7 @@ Be sure to approve all pending `node-bootstrapper` CSRs.
 Wait for the control plane to restart and pick up the new certificates. This might take up to 10 minutes.
 
 
-== Cluster fe0e https://console-openshift-console.apps.cluster-5f68.sandbox55.opentlc.com
+== Cluster https://console-openshift-console.apps.cluster-5f68.sandbox55.opentlc.com
 
 [source]
 ----
@@ -396,6 +406,19 @@ ssh to jumpbox
 ssh to master (get private IP from aws)
 
 
+run the procedures
+
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 8483588535740013578 (0x75bbc2d3455c1c0a)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: OU=openshift, CN=kube-apiserver-service-network-signer
+        Validity
+            Not Before: Jul 24 00:54:12 2019 GMT
+            Not After : Aug 23 00:54:13 2019 GMT
+        Subject: CN=172.30.0.1
+        Subject Public Key Info: 
 
 
 ----
@@ -467,5 +490,65 @@ notBefore=Jul 23 19:08:54 2019 GMT
 notAfter=Aug 22 19:08:55 2019 GMT
 
 Same certs :(  notBefore is too early
+
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 3938497004743880440 (0x36a85a28a4b2eef8)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: OU=openshift, CN=kube-apiserver-service-network-signer
+        Validity
+            Not Before: Jul 23 19:08:54 2019 GMT
+            Not After : Aug 22 19:08:55 2019 GMT
+        Subject: CN=172.30.0.1
+----
+
+
+== Wait a day: cluster 9d72
+
+[source]
+----
+$ openssl s_client -connect $MASTER_API | openssl x509 -noout -dates
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+notBefore=Jul 23 22:26:54 2019 GMT
+notAfter=Aug 22 22:26:55 2019 GMT
+
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 8870908118152368960 (0x7b1bcbeef199d340)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: OU=openshift, CN=kube-apiserver-service-network-signer
+        Validity
+            Not Before: Jul 23 22:26:54 2019 GMT
+            Not After : Aug 22 22:26:55 2019 GMT
+        Subject: CN=172.30.0.1
+
+
+----
+
+== Fresh cluster: 0ef8
+
+[source]
+----
+initial cert:
+
+$ openssl s_client -connect $MASTER_API | openssl x509 -noout -text
+depth=1 OU = openshift, CN = kube-apiserver-service-network-signer
+verify error:num=19:self signed certificate in certificate chain
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 451056269819580937 (0x6427949a04f1209)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: OU=openshift, CN=kube-apiserver-service-network-signer
+        Validity
+            Not Before: Jul 24 16:08:04 2019 GMT
+            Not After : Aug 23 16:08:05 2019 GMT
+        Subject: CN=172.30.0.1
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
 
 ----
