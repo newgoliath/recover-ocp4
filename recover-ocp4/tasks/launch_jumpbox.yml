@@ -165,9 +165,11 @@
 
           Match User ec2-user
             IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+            StrictHostKeyChecking no
 
           Match User core
             IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+            StrictHostKeyChecking no
 
           Host *
             ControlMaster auto
