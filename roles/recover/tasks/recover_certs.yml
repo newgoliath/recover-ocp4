@@ -3,7 +3,6 @@
 
 - name: prereqs
   include: ./jumpbox.yml
-
 - name: Obtain the cluster-kube-apiserver-operator image reference for a release
   hosts: control_plane[0]
   gather_facts: false
@@ -43,3 +42,59 @@
     - name: debug KAO_IMAGE
       debug:
         var: KAO_IMAGE
+
+    - name: podman pull the KAO image
+      shell: |
+        podman pull --authfile=/var/lib/kubelet/config.json {{ KAO_IMAGE }}
+
+    - name: run the recovery-apiserver KAO 
+      shell: |
+        podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator {{KAO_IMAGE}} recovery-apiserver create
+
+    - name: wait for recovery API to come up
+      command: oc --config {{ RECOVERY_KUBECONFIG }} get namespace kube-system
+      register: result
+      until: result.stdout.find("Active") != -1
+      retries: 100
+      delay: 10
+
+    - name: Run the regenerate-certificates command. It fixes the certificates in the API, overwrites the old certificates on the local drive, and restarts static Pods to pick them up.
+      command: "podman run -it --network=host -v /etc/kubernetes/:/etc/kubernetes/:Z --entrypoint=/usr/bin/cluster-kube-apiserver-operator {{ KAO_IMAGE }} regenerate-certificates"
+
+      # force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer. 1/3
+    - name: force new rollouts for the control plane. It will reinstall itself on the other nodes because the kubelet is connected to API servers using an internal load balancer
+      shell: |
+        oc patch --config {{ RECOVERY_KUBECONFIG }} kubeapiserver cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"} }' --type=merge
+        oc patch --config {{ RECOVERY_KUBECONFIG }} kubecontrollermanager cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge
+        oc patch --config {{ RECOVERY_KUBECONFIG }} kubescheduler cluster -p='{"spec": {"forceRedeploymentReason": "recovery-'"$( date --rfc-3339=ns )"'"}}' --type=merge
+
+
+    - name: Get the CA certificate used to validate connections from the API server.
+      shell: |
+        oc --config {{ RECOVERY_KUBECONFIG }} {% raw %} get configmap kube-apiserver-to-kubelet-client-ca -n openshift-kube-apiserver-operator --template='{{ index .data "ca-bundle.crt" }}' > /etc/kubernetes/ca.crt {% endraw %}
+
+    - name: fetch cert
+      fetch:
+        src: /etc/kubernetes/ca.crt
+        dest: ../files/ca.crt
+        flat: yes
+
+- name: put certs on all masters and recover the kublet
+  hosts: control_plane:workers
+  gather_facts: false
+  become: yes
+
+  tasks:
+    - name: copy ca.crt
+      copy:
+        src: ../files/ca.crt
+        dest: /etc/kubernetes/ca.crt
+
+    - name: bounce kublet
+      shell: |
+        # rm -rf /var/lib/kubelet/pki
+        systemctl restart kubelet
+
+
+
+
