@@ -1,0 +1,45 @@
+---
+
+
+- name: prereqs
+  include: ./jumpbox.yml
+
+- name: Obtain the cluster-kube-apiserver-operator image reference for a release
+  hosts: control_plane[0]
+  gather_facts: false
+  become: yes
+  vars:
+    RECOVERY_KUBECONFIG: /etc/kubernetes/static-pod-resources/recovery-kube-apiserver-pod/admin.kubeconfig
+
+  tasks:
+    - name: hostname
+      command: hostname
+
+
+    - name: put kubeconfig on remote host
+      copy:
+        src: "{{ lookup('env', 'HOME') }}/cluster-{{ lookup('env', 'GUID') }}/auth/kubeconfig"
+        dest: "/home/core/kubeconfig"
+
+    - name: openshift version
+      shell: |
+        ls /etc/kubernetes/static-pod-resources/kube-apiserver-pod-*/configmaps/kube-apiserver-pod/version | head -1 | xargs sed -n 's/.\([^-]*\)-.*/\1/p' 
+      register: openshift_version
+
+    - name: debug openshift_version
+      debug:
+        var: openshift_version
+
+    - name: set cluster_version
+      set_fact:
+        CLUSTER_VERSION: "quay.io/openshift-release-dev/ocp-release:{{ openshift_version.stdout }}"
+
+    - name: set KAO_IMAGE
+      shell: |
+        CONTAINER_ID=$( crictl ps | awk '/kube-apiserver-cert-syncer/ { print $1 }' )
+        crictl inspecti --output table  beaf65fce4dc16947c5bd5d1ca7e16313234c393e8ca1c4251ac9b85094972bb | awk '/Digest/ { print $2 }'
+      register: KAO_IMAGE
+
+    - name: debug KAO_IMAGE
+      debug:
+        var: KAO_IMAGE
